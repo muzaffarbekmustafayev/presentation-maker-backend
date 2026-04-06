@@ -39,6 +39,14 @@ const SlideSchema = new mongoose.Schema({
   transition: { type: String, default: 'none' },
   imagePrompt: String,
   notes: String,
+  charts: [{
+    type: { type: String }, // bar, pie, line
+    title: String,
+    data: [{
+      label: String,
+      value: Number
+    }]
+  }]
 });
 
 
@@ -50,7 +58,8 @@ const PresentationSchema = new mongoose.Schema({
   template: { type: String, default: 'Minimal' },
   slideCount: { type: Number, default: 5 },
   language: { type: String, default: 'English' },
+  isPublic: { type: Boolean, default: false },
+  views: { type: Number, default: 0 }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Presentation', PresentationSchema);
-
