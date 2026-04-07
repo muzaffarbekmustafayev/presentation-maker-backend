@@ -5,10 +5,6 @@ node_modules/
 .env
 .env.*
 
-# Uploaded files
-uploads/*
-!uploads/.gitkeep
-
 # Logs
 *.log
 npm-debug.log*
@@ -19,3 +15,6 @@ Thumbs.db
 
 # Bot sessions
 sessions.json
+
+# Temp
+tmp/

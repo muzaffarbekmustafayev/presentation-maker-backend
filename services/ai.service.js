@@ -1,77 +1,100 @@
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const axios = require('axios');
 const fs = require('fs');
-const path = require('path');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
 const { getUnsplashImage } = require('./image.service');
 
-const ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// Prioritized list of models
-const MODELS = [
-  'gemini-2.5-flash'
-];
+const API_KEY = process.env.GEMINI_API_KEY;
+const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+const MODEL = 'gemini-2.5-flash';
 
 /**
- * Common AI parsing and processing logic with Fallback
+ * Common AI parsing and processing logic
  */
-async function processAIResponse(promptText, preferredModel = 'gemini-2.5-flash') {
-  let lastError = null;
-  // Try preferred model first, then the rest of the list
-  const modelsToTry = [preferredModel, ...MODELS.filter(m => m !== preferredModel)];
-  
-  for (const modelName of modelsToTry) {
-    try {
-      console.log(`🤖 Attempting with model: ${modelName}`);
-      const model = ai.getGenerativeModel({ model: modelName });
-      const result = await model.generateContent(promptText);
-      const response = await result.response;
-      let text = response.text().trim();
+async function processAIResponse(promptText) {
+  try {
+    console.log(`🤖 Requesting Gemini AI (${MODEL})...`);
+    
+    const url = `${BASE_URL}/models/${MODEL}:generateContent?key=${API_KEY}`;
+    
+    const response = await axios.post(url, {
+      contents: [{
+        parts: [{ text: promptText }]
+      }]
+    });
 
-      if (text.startsWith('```json')) text = text.slice(7, -3).trim();
-      else if (text.startsWith('```')) text = text.slice(3, -3).trim();
-      
-      try {
-        return JSON.parse(text);
-      } catch (e) {
-        return text;
-      }
-    } catch (error) {
-      console.error(`⚠️ Model ${modelName} failed:`, error.message);
-      lastError = error;
-      // If error is 429 (Rate limit) or 503 (Overloaded) or other transient error, try next
-      if (error.status === 429 || error.status === 503 || error.message.includes('quota') || error.message.includes('limit')) {
-        continue;
-      }
-      // If it's a fatal error (e.g. invalid auth), maybe stop? But usually fallback is safer.
-      continue;
+    if (!response.data || !response.data.candidates || !response.data.candidates[0]) {
+      throw new Error('Invalid response from Gemini AI');
     }
+
+    let text = response.data.candidates[0].content.parts[0].text.trim();
+
+    // Clean JSON formatting if present
+    if (text.startsWith('```json')) {
+      text = text.replace(/^```json/, '').replace(/```$/, '').trim();
+    } else if (text.startsWith('```')) {
+      text = text.replace(/^```/, '').replace(/```$/, '').trim();
+    }
+    
+    try {
+      const parsed = JSON.parse(text);
+      
+      // Sanitization: Ensure slides and their content are in correct format
+      if (parsed.slides && Array.isArray(parsed.slides)) {
+        parsed.slides = parsed.slides.map(slide => {
+          if (slide.content && Array.isArray(slide.content)) {
+            // Convert any objects/arrays inside content to simple strings
+            slide.content = slide.content.map(item => {
+              if (typeof item === 'object') {
+                // If AI returns something like {label: '..', value: '..'}, flatten it
+                return Object.values(item).filter(v => typeof v === 'string' || typeof v === 'number').join(': ');
+              }
+              return String(item);
+            });
+          } else if (slide.content && typeof slide.content === 'string') {
+            slide.content = [slide.content];
+          } else {
+            slide.content = [];
+          }
+          return slide;
+        });
+      }
+      
+      return parsed;
+    } catch (e) {
+      return text;
+    }
+  } catch (error) {
+    console.error(`❌ Gemini AI Error (${MODEL}):`, error.response ? error.response.data : error.message);
+    throw error;
   }
-  throw lastError || new Error("All AI models failed or quota exceeded.");
 }
 
 /**
- * Analyze Voice (STT) with Fallback
+ * Analyze Voice (STT)
  */
 async function analyzeVoice(buffer) {
-  const modelsToTry = ['gemini-1.5-flash', ...MODELS.filter(m => m !== 'gemini-1.5-flash')];
-  let lastError = null;
-  
-  for (const modelName of modelsToTry) {
-    try {
-      const model = ai.getGenerativeModel({ model: modelName });
-      const result = await model.generateContent([
-        "Transcribe this voice message and refine it into a clear presentation topic/prompt. Output ONLY the refined text.",
-        { inlineData: { data: buffer.toString('base64'), mimeType: 'audio/ogg' } }
-      ]);
-      return result.response.text().trim();
-    } catch (error) {
-      console.error(`⚠️ Voice Analysis failed with ${modelName}:`, error.message);
-      lastError = error;
-      continue;
+  try {
+    const url = `${BASE_URL}/models/${MODEL}:generateContent?key=${API_KEY}`;
+    
+    const response = await axios.post(url, {
+      contents: [{
+        parts: [
+          { text: "Transcribe this voice message and refine it into a clear presentation topic/prompt. Output ONLY the refined text." },
+          { inlineData: { data: buffer.toString('base64'), mimeType: 'audio/ogg' } }
+        ]
+      }]
+    });
+
+    if (!response.data || !response.data.candidates || !response.data.candidates[0]) {
+      throw new Error('Invalid response from Gemini AI during voice analysis');
     }
+
+    return response.data.candidates[0].content.parts[0].text.trim();
+  } catch (error) {
+    console.error(`❌ Voice Analysis failed:`, error.response ? error.response.data : error.message);
+    throw error;
   }
-  throw lastError || new Error("Voice analysis failed.");
 }
 
 /**
@@ -101,44 +124,42 @@ async function generateSlides(topic, slideCount, template, language) {
   Language: ${language}.
   
   MANDATORY STRUCTURE:
-  1. Slide 1: Titul (Title, University/Faculty Placeholder, Author Placeholder, Date).
-  2. Slide 2: Reja (Outline) with 3-5 main points.
-  3. Body Slides: Professional content related to "${topic}".
-  4. Penultimate Slide: Xulosa (Conclusion) summarizing key results.
-  5. Final Slide: "E'tiboringiz uchun rahmat!" (Thank you).
+  1. Slide 1: Titul (Title, Subtitle/Organization, Author, Date).
+  2. Slide 2: Mundarija (Table of Contents) with clear points.
+  3. Body Slides: Professional analysis, data, and insights.
+  4. Penultimate Slide: Xulosa (Conclusion) or Summary.
+  5. Final Slide: Minnatdorchilik (Thank you / Q&A).
+
+  LAYOUT OPTIONS (MANDATORY):
+  - 'title-content': Standard text title and bullets. Use for regular info slides.
+  - 'title-image-left': Image on the left, text/bullets on the right.
+  - 'title-image-right': Image on the right, text/bullets on the left.
+  - 'two-column': Two side-by-side bullet lists. Use for comparisons or dense info.
+  - 'big-quote': A large impactful quote or key statement.
+  - 'stats-grid': Key metrics or 3-4 short points in a grid/boxes. Use for data or summary.
 
   CONTENT RULES:
-  - Max 5 bullet points per slide.
-  - No long paragraphs. Use clear, concise keywords and short sentences.
-  - Sarlavha (Title) must be clear.
+  - Be concise. Use professional terminology.
+  - Prefer strong keywords over long sentences.
+  - Language: ${language}.
   
-  Format the response as a JSON object with a "slides" array. 
-  Each slide object should have:
-  - "title": a string 
-  - "content": an array of 3-5 concise bullet points
-  - "layout": a string (one of: 'title-text', 'title-image-left', 'title-image-right', 'two-column')
-  - "imageKeyword": specific English keywords for high-quality Unsplash image.
-  - "notes": speaker notes.
-  Format as JSON: {"slides": [...]}`;
+  Format as JSON: {"slides": [{"title": "...", "content": ["..."], "layout": "title-content | title-image-left | title-image-right | two-column | big-quote | stats-grid", "imageKeyword": "...", "notes": "...", "charts": [{"type": "bar | pie | line", "title": "...", "data": [{"label": "...", "value": 100}]}]}]}`;
 
   const data = await processAIResponse(prompt);
   let slides = data.slides || (Array.isArray(data) ? data : [data]);
 
-  // Fetch images from Unsplash for each slide
   const slidesWithImages = await Promise.all(slides.map(async (slide, idx) => {
     let imageUrl = null;
     if (slide.imageKeyword) {
       imageUrl = await getUnsplashImage(slide.imageKeyword);
     }
     
-    // Fallback if Unsplash fails or no keyword
     if (!imageUrl) {
       const seed = Math.floor(Math.random() * 10000) + idx;
-      const kw = slide.imageKeyword ? encodeURIComponent(slide.imageKeyword.replace(/\s+/g, '')) : 'minimal';
+      const kw = slide.imageKeyword ? encodeURIComponent(slide.imageKeyword.replace(/\s+/g, '')) : 'professional';
       imageUrl = `https://loremflickr.com/800/600/${kw}?lock=${seed}`;
     }
     
-    console.log(`🖼️ [IMAGE] Slide ${idx+1} keyword: "${slide.imageKeyword}" | URL: ${imageUrl.substring(0, 40)}...`);
     return {
       ...slide,
       theme: template,
@@ -147,6 +168,20 @@ async function generateSlides(topic, slideCount, template, language) {
   }));
 
   return slidesWithImages;
+}
+
+/**
+ * AI Copilot: Refine specific content
+ */
+async function refineContent(originalText, instruction, language = 'English') {
+  const prompt = `Act as a professional editor. 
+  Original text: "${originalText}"
+  Instruction: "${instruction}"
+  Language: ${language}
+  
+  Provide only the refined text. No extra explanations.`;
+  
+  return await processAIResponse(prompt);
 }
 
 /**
@@ -167,6 +202,15 @@ async function translatePresentation(presentation, targetLang) {
 async function generateSlidesFromDoc(content, slideCount, template, language) {
   const prompt = `Based on this document, create a professional presentation with ${slideCount} slides in ${language}. 
   Document content: ${content.substring(0, 15000)}
+  
+  LAYOUT OPTIONS (MANDATORY):
+  - 'title-content': Standard text title and bullets.
+  - 'title-image-left': Image on the left, text/bullets on the right.
+  - 'title-image-right': Image on the right, text/bullets on the left.
+  - 'two-column': Two side-by-side bullet lists.
+  - 'big-quote': A large impactful quote or key statement.
+  - 'stats-grid': Key metrics or 3-4 short points in a grid.
+
   Format the response as a JSON object with a "slides" array.
   Each slide must have "title", "content" (array), "layout", "imageKeyword" (English keyword), and "notes".`;
   
@@ -185,7 +229,6 @@ async function generateSlidesFromDoc(content, slideCount, template, language) {
       imageUrl = `https://loremflickr.com/800/600/${kw}?lock=${seed}`;
     }
 
-    console.log(`🖼️ [IMAGE] DocSlide ${idx+1} result: ${imageUrl ? 'SUCCESS' : 'FAILED'}`);
     return {
       ...slide,
       theme: template,
@@ -224,7 +267,6 @@ async function generateDocument(topic, pageCount, language, docType = 'General')
     if (page.imageKeyword) {
       imageUrl = await getUnsplashImage(page.imageKeyword);
     }
-    console.log(`🖼️ [IMAGE] Page ${idx+1} result: ${imageUrl ? 'SUCCESS (Unsplash)' : 'FAILED (None)'}`);
     return {
       ...page,
       images: imageUrl ? [{ url: imageUrl }] : []

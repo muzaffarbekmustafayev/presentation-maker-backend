@@ -1,15 +1,29 @@
 const express = require('express');
 const router = express.Router();
-const fs = require('fs');
+
 const path = require('path');
 const auth = require('../middleware/auth');
 const Presentation = require('../models/Presentation');
 const multer = require('multer');
-if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ storage: multer.memoryStorage() });
 
-const { generateSlides, generateSlidesFromDoc } = require('../services/ai.service');
+
+
+const { generateSlides, generateSlidesFromDoc, refineContent } = require('../services/ai.service');
 const { generatePPTX, generatePDF } = require('../services/export.service');
+
+// @route   POST api/presentations/refine-content
+// @desc    Refine slide content using AI (Copilot)
+router.post('/refine-content', auth, async (req, res) => {
+  const { originalText, instruction, language } = req.body;
+  try {
+    const refinedText = await refineContent(originalText, instruction, language);
+    res.json({ refinedText });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Refinement failed');
+  }
+});
 
 // @route   POST api/presentations/generate
 // @desc    Generate a presentation using AI
@@ -43,38 +57,12 @@ router.post('/generate', auth, async (req, res) => {
 router.post('/upload', auth, upload.single('file'), async (req, res) => {
   try {
     const { slideCount, template, language } = req.body;
-    let fileContent = '';
     const ext = path.extname(req.file.originalname).toLowerCase();
-
-    if (ext === '.pdf') {
-        const pdf = require('pdf-parse');
-        const dataBuffer = fs.readFileSync(req.file.path);
-        const data = await pdf(dataBuffer);
-        fileContent = data.text;
-    } else if (ext === '.docx' || ext === '.doc') {
-        const mammoth = require('mammoth');
-        const data = await mammoth.extractRawText({ path: req.file.path });
-        fileContent = data.value;
-    } else {
-        // Fallback for TXT/MD
-        fileContent = fs.readFileSync(req.file.path, 'utf-8');
-    }
     
-    const prompt = `Based on this document content, create a professional presentation with ${slideCount} slides in ${language}. 
-    Focus on key insights and important data from the text.
-    Document: ${fileContent.substring(0, 15000)}
-    
-    Format the response as a JSON object with a "slides" array. 
-    Each slide object should have:
-    - "title": a string (catchy and informative)
-    - "content": an array of 3-5 concise bullet points
-    - "layout": a string (one of: 'title-text', 'title-image-left', 'title-image-right', 'two-column', 'chart-only')
-    - "imageKeyword": 1 or 2 simple comma-separated keywords (in English) describing the slide's topic to fetch a stock photo (e.g. "business,startup").
-    - "notes": a detailed string for speaker notes.
-    - "charts": (optional) an array of objects for charts if numeric data is found in text. Each object: {"type": "bar"|"pie"|"line", "title": "Chart Title", "data": [{"label": "Name", "value": 100}]}.
-    Provide ONLY the JSON object.`;
+    const { parseDocument, generateSlidesFromDoc } = require('../services/ai.service');
+    const fileContent = await parseDocument(req.file.buffer, ext);
 
-    const processedSlides = await generateProcessedSlides(prompt, template);
+    const processedSlides = await generateSlidesFromDoc(fileContent, slideCount, template, language);
 
     const newPresentation = new Presentation({
       title: req.file.originalname.replace(/\.[^/.]+$/, ""),

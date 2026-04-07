@@ -118,8 +118,16 @@ module.exports = (bot) => {
           return bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: presentationActionKeyboard(pres.id, pres.isPublic) });
         }
       } catch (e) {
-        console.error(e);
-        bot.safeDelete(chatId, progId); session.step = null; session.activeTask = false; return bot.sendMessage(chatId, '❌ AI da xatolik. Qayta urinib ko\'ring.');
+        console.error('AI Generation Error:', e);
+        bot.safeDelete(chatId, progId); 
+        session.step = null; 
+        session.activeTask = false; 
+        
+        if (e.name === 'ValidationError') {
+          return bot.sendMessage(chatId, '❌ <b>Ma\'lumot saqlashda xato!</b>\nAI noto\'g\'ri formatda ma\'lumot qaytardi. Iltimos, boshqa mavzu bilan yoki qaytadan urinib ko\'ring.', { parse_mode: 'HTML' });
+        }
+        
+        return bot.sendMessage(chatId, '❌ AI da xatolik. Qayta urinib ko\'ring.');
       }
     }
 
@@ -180,18 +188,22 @@ module.exports = (bot) => {
     
     // Translations
     if (data.startsWith('trans_')) {
-      const parts = data.split('_'); const langMap = { 'ru': 'Russian', 'en': 'English' }; const lang = langMap[parts[1]]; const id = parts[2];
+      const parts = data.split('_'); 
+      const langMap = { 'ru': 'Russian', 'en': 'English', 'uz': 'Uzbek' }; 
+      const lang = langMap[parts[1]] || 'English'; 
+      const id = parts[2];
       const p = await Presentation.findById(id);
       if (p.userId.toString() !== session.userId) return bot.sendMessage(chatId, '❌ Xato.');
       const prog = await bot.sendMessage(chatId, `⏳ ${lang} tiliga tarjima qilinmoqda...`);
       session.activeTask = true;
       try {
-        const newSlides = await translatePresentation(p.slides, lang, p.template);
+        const newSlides = await translatePresentation(p, lang);
         p.slides = newSlides; p.language = lang; await p.save();
         bot.safeDelete(chatId, prog.message_id);
         const t = `✅ Tarjima qilindi!\n📌 <b>${escapeHtml(p.title)}</b>\n🌐 Til: ${lang}`;
         bot.editMessageText(t, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: presentationActionKeyboard(p.id, p.isPublic) });
       } catch (e) {
+        console.error('Translation Error:', e);
         bot.safeDelete(chatId, prog.message_id);
         bot.sendMessage(chatId, '❌ Tarjimada xatolik.');
       } finally {
